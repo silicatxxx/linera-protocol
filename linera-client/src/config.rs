@@ -8,10 +8,7 @@ use std::{
 };
 
 use linera_base::{
-    crypto::{
-        AccountPublicKey, AccountSecretKey, BcsSignable, CryptoHash, CryptoRng, Ed25519SecretKey,
-        ValidatorPublicKey, ValidatorSecretKey,
-    },
+    crypto::{AccountPublicKey, BcsSignable, CryptoHash, ValidatorPublicKey, ValidatorSecretKey},
     data_types::{Amount, Timestamp},
     identifiers::{ChainDescription, ChainId},
 };
@@ -63,10 +60,10 @@ pub struct ValidatorServerConfig {
     pub internal_network: ValidatorInternalNetworkConfig,
 }
 
+#[cfg(not(web))]
+use crate::persistent::Persist;
 #[cfg(web)]
 use crate::persistent::{LocalPersist as Persist, LocalPersistExt as _};
-#[cfg(not(web))]
-use crate::persistent::{Persist, PersistExt as _};
 
 /// The (public) configuration for all validators.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
@@ -98,7 +95,6 @@ impl CommitteeConfig {
 /// [`Persist`].
 pub struct WalletState<W> {
     wallet: W,
-    prng: Box<dyn CryptoRng>,
 }
 
 impl<W: Persist<Target = Wallet>> WalletState<W> {
@@ -134,9 +130,6 @@ impl<W: Persist<Target = Wallet>> Persist for WalletState<W> {
     }
 
     async fn persist(&mut self) -> Result<(), W::Error> {
-        self.wallet
-            .mutate(|w| w.refresh_prng_seed(&mut self.prng))
-            .await?;
         tracing::trace!("Persisted user chains");
         Ok(())
     }
@@ -160,28 +153,33 @@ impl WalletState<persistent::File<Wallet>> {
 }
 
 #[cfg(with_indexed_db)]
-impl WalletState<persistent::IndexedDb<Wallet>> {
-    pub async fn create_from_indexed_db(key: &str, wallet: Wallet) -> Result<Self, Error> {
+impl<K> WalletState<persistent::IndexedDb<Wallet>> {
+    pub async fn create_from_indexed_db(key: &str, wallet: Wallet) -> Result<Self, Error>
+    where
+        K: Serialize + DeserializeOwned,
+    {
         Ok(Self::new(
             persistent::IndexedDb::read_or_create(key, wallet).await?,
         ))
     }
 
-    pub async fn read_from_indexed_db(key: &str) -> Result<Option<Self>, Error> {
+    pub async fn read_from_indexed_db(key: &str) -> Result<Option<Self>, Error>
+    where
+        K: Serialize + DeserializeOwned,
+    {
         Ok(persistent::IndexedDb::read(key).await?.map(Self::new))
     }
 }
 
 impl<W: Deref<Target = Wallet>> WalletState<W> {
     pub fn new(wallet: W) -> Self {
-        Self {
-            prng: wallet.make_prng(),
-            wallet,
-        }
+        Self { wallet }
     }
+}
 
-    pub fn generate_key_pair(&mut self) -> AccountSecretKey {
-        AccountSecretKey::Ed25519(Ed25519SecretKey::generate_from(&mut self.prng))
+impl<W: DerefMut<Target = Wallet>> WalletState<W> {
+    pub fn generate_key_pair(&mut self) -> AccountPublicKey {
+        self.signer.generate_new()
     }
 }
 
